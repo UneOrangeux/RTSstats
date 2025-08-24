@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TT RTS Leaderboard – Minimal</title>
+<title>TT RTS Leaderboard – Minimal v2</title>
 <style>
   body{font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b1220;color:#e6edf3}
   .wrap{max-width:920px;margin:0 auto;padding:20px}
@@ -20,6 +20,8 @@
   .muted{color:#9fb3c8}
   .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
   .status{font-size:12px;color:#9fb3c8}
+  .buttons{display:flex;gap:8px;align-items:flex-end}
+  pre{white-space:pre-wrap}
 </style>
 </head>
 <body>
@@ -49,9 +51,9 @@
         <label>Request limit</label>
         <input id="limit" type="number" value="50">
       </div>
-      <div>
-        <label>&nbsp;</label>
-        <button id="refreshBtn">Refresh</button>
+      <div class="buttons">
+        <button type="button" id="refreshBtn">Refresh</button>
+        <button type="button" id="testBtn" title="Quick JS test">Test</button>
       </div>
     </div>
     <details style="margin-top:10px">
@@ -76,6 +78,7 @@
       </div>
     </details>
     <div class="status" id="status" style="margin-top:8px">Ready.</div>
+    <pre id="log" class="muted mono" style="margin-top:8px;max-height:120px;overflow:auto"></pre>
   </div>
 
   <div class="card">
@@ -97,17 +100,19 @@
     Each API call costs 1 charge on your private key. Start with a small Request limit.
     If you see “CORS” errors, run a tiny proxy:
 
-    <pre class="mono">
-npm init -y
+    <pre class="mono">npm init -y
 npm i express node-fetch
-node proxy.js
-    </pre>
+node proxy.js</pre>
   </div>
 </div>
 
-<script>
+<script defer>
+(function(){
   const $ = (id) => document.getElementById(id);
   const state = { rows: [] };
+  const logEl = $("#log");
+  function log(...args){ const msg = args.join(" "); logEl.textContent += msg + "\n"; console.log(...args); }
+  function setStatus(s){ $("#status").textContent = s; log(s); }
 
   function headers(){
     const h = { "X-Tycoon-Key": $("#apiKey").value.trim() };
@@ -117,7 +122,9 @@ node proxy.js
   }
 
   async function fetchJSON(url, opts){
+    log("GET", url);
     const res = await fetch(url, opts);
+    log("...status", res.status);
     if(!res.ok) throw new Error(res.status+" "+res.statusText);
     return res.json();
   }
@@ -156,21 +163,24 @@ node proxy.js
       .sort((a,b)=>(b.streak??-1)-(a.streak??-1));
 
     $("#count").textContent = rows.length+" players";
-    tbody.innerHTML = rows.map((r,i)=>\`<tr>
-      <td>\${i+1}</td>
-      <td class="mono">\${r.id}</td>
-      <td>\${r.name||""}</td>
-      <td><b>\${r.streak ?? "—"}</b></td>
-      <td class="muted">\${r.locked?"locked":(r.error||"")}</td>
-      <td class="muted mono">\${r.serverHint||""}</td>
-    </tr>\`).join("");
+    tbody.innerHTML = rows.map((r,i)=>`<tr>
+      <td>${i+1}</td>
+      <td class="mono">${r.id}</td>
+      <td>${r.name||""}</td>
+      <td><b>${r.streak ?? "—"}</b></td>
+      <td class="muted">${r.locked?"locked":(r.error||"")}</td>
+      <td class="muted mono">${r.serverHint||""}</td>
+    </tr>`).join("");
   }
 
   async function build(){
     try{
       const key = $("#apiKey").value.trim();
       if(!key){ alert("Enter your Private API key"); return; }
-      $("#status").textContent = "Discovering servers…";
+      localStorage.setItem("tt_key", key);
+      localStorage.setItem("tt_pub", $("#pubKey").value.trim());
+
+      setStatus("Discovering servers…");
       const base = $("#apiBase").value.trim();
       const path = $("#streakPath").value.trim();
       const serversJson = $("#serversJson").value.trim();
@@ -194,12 +204,12 @@ node proxy.js
           const json = await fetchJSON(url);
           const players = parsePlayersFromWidget(json);
           players.forEach(p=>{ if(!seen.has(p.id)) seen.set(p.id, {...p, serverHint: w}); });
-        }catch(e){ console.warn("widget fail", w, e); }
+        }catch(e){ log("widget fail", w, e.message); }
       }
       const all = Array.from(seen.values()).slice(0, limit);
-      if(all.length===0){ $("#status").textContent = "No players discovered."; state.rows=[]; render(); return; }
+      if(all.length===0){ setStatus("No players discovered."); state.rows=[]; render(); return; }
 
-      $("#status").textContent = "Querying streaks for "+all.length+" players…";
+      setStatus("Querying streaks for "+all.length+" players…");
       const out = [];
       for(const p of all){
         const url = (proxy? proxy: base) + path.replace("{vrpId}", encodeURIComponent(p.id));
@@ -218,7 +228,7 @@ node proxy.js
         }catch(e){
           const msg = String(e.message||"error");
           if(/CORS|cors|blocked|Access-Control/i.test(msg)){
-            $("#status").textContent = "CORS blocked. Set a proxy URL (see Advanced).";
+            setStatus("CORS blocked. Set a proxy URL (see Advanced).");
             out.push({...p, streak:null, error:"CORS"});
           } else {
             out.push({...p, streak:null, error:msg});
@@ -227,19 +237,22 @@ node proxy.js
       }
       state.rows = out;
       render();
-      $("#status").textContent = "Done.";
-      localStorage.setItem("tt_key", $("#apiKey").value.trim());
-      localStorage.setItem("tt_pub", $("#pubKey").value.trim());
+      setStatus("Done.");
     }catch(err){
-      $("#status").textContent = "Error: "+err.message;
-      console.error(err);
+      setStatus("Error: "+err.message);
+      log("Error", err);
     }
   }
 
+  // Wire up
   $("#apiKey").value = localStorage.getItem("tt_key")||"";
   $("#pubKey").value = localStorage.getItem("tt_pub")||"";
   $("#refreshBtn").addEventListener("click", build);
+  $("#testBtn").addEventListener("click", ()=> setStatus("Button works ✔"));
   $("#filter").addEventListener("input", render);
-</script>
+
+  // Optional: auto-run once if key exists
+  if($("#apiKey").value){ setTimeout(()=>{ build(); }, 500); }
+})();</script>
 </body>
 </html>
