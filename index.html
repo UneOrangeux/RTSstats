@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TT RTS Leaderboard (Unofficial User App)</title>
+  <meta name="description" content="Build a personal RTS streak leaderboard for Transport Tycoon using the public API and server player widgets." />
+  <!-- React 18 (UMD) + Babel for in-browser JSX -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    :root { --bg:#f8fafc; --card:#ffffff; --txt:#0f172a; --muted:#64748b; --border:#e2e8f0; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt); font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 24px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:16px; box-shadow:0 1px 2px rgba(0,0,0,.04); padding:16px; }
+    h1 { font-size: 22px; margin:0 0 8px; }
+    h2 { font-size: 16px; margin:0 0 8px; }
+    .row { display:grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 840px){ .row{ grid-template-columns: 1fr 1fr; } }
+    label { display:block; font-size:12px; color:var(--muted); margin:8px 0 6px; }
+    input, textarea, select { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:12px; font:inherit; }
+    textarea { min-height: 90px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .btn { appearance:none; border:none; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer; }
+    .btn-primary { background:#0f172a; color:#fff; }
+    .btn-ghost { background:#fff; border:1px solid var(--border); color:#0f172a; }
+    .flex { display:flex; align-items:center; gap:10px; }
+    .between { justify-content: space-between; }
+    .muted { color:var(--muted); }
+    table { width:100%; border-collapse: collapse; }
+    th, td { padding:8px 10px; border-bottom:1px solid var(--border); text-align:left; }
+    th { font-size:12px; color:var(--muted); text-transform: uppercase; letter-spacing:.02em; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    function saveFile(filename, text) {
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.setAttribute("download", filename);
+      document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    }
+
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    }
+
+    function parsePlayersFromWidget(json) {
+      if (!json) return [];
+      const dig = (obj) => {
+        if (!obj) return [];
+        if (Array.isArray(obj)) {
+          return obj.map(p => ({
+            name: p.name || p.playerName || p.PlayerName || "Unknown",
+            id: p.id || p.vrp || p.vRP || p.vrp_id || p.netId || null,
+          })).filter(p => p.id != null);
+        }
+        if (Array.isArray(obj.players)) {
+          return obj.players.map(p => ({
+            name: p.name || p.playerName || p.PlayerName || "Unknown",
+            id: p.id || p.vrp || p.vRP || p.vrp_id || p.netId || null,
+          })).filter(p => p.id != null);
+        }
+        return Object.values(obj).flatMap(v => dig(v));
+      };
+      return dig(json);
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    function App(){
+      const [apiBase, setApiBase] = useState("https://v1.api.tycoon.community");
+      const [streakPath, setStreakPath] = useState("/main/streak/{vrpId}");
+      const [serversJsonUrl, setServersJsonUrl] = useState("https://cdn.tycoon.community/servers.json");
+      const [extraWidgets, setExtraWidgets] = useState("");
+      const [apiKey, setApiKey] = useState(localStorage.getItem('tt_key') || "");
+      const [publicKey, setPublicKey] = useState(localStorage.getItem('tt_pub') || "");
+      const [respectLocks, setRespectLocks] = useState(true);
+      const [limitRequests, setLimitRequests] = useState(50);
+      const [concurrency, setConcurrency] = useState(5);
+      const [status, setStatus] = useState("");
+      const [rows, setRows] = useState([]);
+      const [filterText, setFilterText] = useState("");
+
+      const headers = useMemo(() => {
+        const h = { "X-Tycoon-Key": apiKey };
+        if (publicKey) h["X-Tycoon-Public-Key"] = publicKey;
+        return h;
+      }, [apiKey, publicKey]);
+
+      const filteredRows = useMemo(() => {
+        const t = filterText.trim().toLowerCase();
+        const out = rows.filter(r => !t || `${r.name}`.toLowerCase().includes(t) || `${r.id}`.includes(t));
+        return out.sort((a, b) => (b.streak ?? -1) - (a.streak ?? -1));
+      }, [rows, filterText]);
+
+      function persistKeys(){
+        localStorage.setItem('tt_key', apiKey);
+        localStorage.setItem('tt_pub', publicKey);
+      }
+
+      async function collectWidgetUrls() {
+        const manual = extraWidgets.split(/\n+/).map(s => s.trim()).filter(Boolean);
+        try {
+          setStatus("Auto-discovering servers.json…");
+          const servers = await fetchJSON(serversJsonUrl);
+          const discovered = [];
+          const list = Array.isArray(servers?.servers) ? servers.servers : Array.isArray(servers) ? servers : [];
+          for (const s of list) {
+            const p = s?.endpoints?.players || s?.players || s?.widget || s?.player_widget;
+            if (typeof p === 'string') discovered.push(p);
+          }
+          return [...new Set([...manual, ...discovered])];
+        } catch (e) {
+          console.warn("Auto-discover failed", e);
+          return manual; // fallback
+        }
+      }
+
+      async function handleBuild(){
+        if (!apiKey) { alert("Enter your Private API key first (stored locally)."); return; }
+        persistKeys();
+        setStatus("Gathering players from widgets…");
+        setRows([]);
+
+        const urls = await collectWidgetUrls();
+        const seen = new Map();
+
+        for (const url of urls) {
+          try {
+            const json = await fetchJSON(url);
+            const players = parsePlayersFromWidget(json);
+            for (const p of players) {
+              if (!seen.has(p.id)) seen.set(p.id, { id: String(p.id), name: p.name, serverHint: url });
+            }
+          } catch (e) {
+            console.warn("Widget fetch failed:", url, e);
+          }
+        }
+
+        const allPlayers = Array.from(seen.values());
+        if (allPlayers.length === 0) { setStatus("No players discovered."); return; }
+
+        const limited = allPlayers.slice(0, Math.max(0, limitRequests));
+        setStatus(`Querying streaks for ${limited.length} player(s)… (charges may apply)`);
+
+        const queue = [...limited];
+        const results = [];
+
+        async function worker(){
+          while(queue.length){
+            const p = queue.shift();
+            const url = `${apiBase}${streakPath.replace("{vrpId}", encodeURIComponent(p.id))}`;
+            try {
+              const data = await fetchJSON(url, { headers });
+              if (respectLocks && data && data.error === "locked") {
+                results.push({ ...p, streak: null, locked: true });
+              } else {
+                const streak = data?.streak ?? data?.rts?.streak ?? data?.value ?? null;
+                results.push({ ...p, streak, locked: false });
+              }
+            } catch (e) {
+              results.push({ ...p, streak: null, error: e.message });
+            }
+            await sleep(120);
+          }
+        }
+
+        const workers = Array.from({ length: Math.max(1, Math.min(concurrency, 12)) }, () => worker());
+        await Promise.all(workers);
+
+        setRows(results);
+        setStatus(`Done. Retrieved ${results.filter(r => r.streak != null).length} streak(s).`);
+      }
+
+      function exportCSV(){
+        const header = ["Rank","vRP ID","Name","Streak","Locked","ServerHint"]; 
+        const sorted = [...filteredRows].sort((a,b) => (b.streak ?? -1) - (a.streak ?? -1));
+        const lines = [header.join(",")];
+        sorted.forEach((r,i)=>{
+          lines.push([i+1, r.id, JSON.stringify(r.name ?? ""), r.streak ?? "", r.locked?"yes":"", JSON.stringify(r.serverHint ?? "")].join(","));
+        });
+        saveFile("tt_rts_leaderboard.csv", lines.join("\n"));
+      }
+
+      return (
+        <div className="wrap">
+          <div className="flex between" style={{marginBottom:12}}>
+            <h1>TT RTS Leaderboard (Unofficial User App)</h1>
+            <button className="btn btn-ghost" onClick={exportCSV}>Export CSV</button>
+          </div>
+
+          <div className="row">
+            <div className="card">
+              <h2>API Settings</h2>
+              <label>API Base URL</label>
+              <input value={apiBase} onChange={e=>setApiBase(e.target.value)} />
+              <label>Streak Path (use {"{vrpId}"})</label>
+              <input value={streakPath} onChange={e=>setStreakPath(e.target.value)} />
+
+              <div className="flex" style={{gap:12, marginTop:8}}>
+                <div style={{flex:1}}>
+                  <label>Private API Key</label>
+                  <input value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="X-Tycoon-Key" />
+                </div>
+                <div style={{flex:1}}>
+                  <label>Public Key (optional)</label>
+                  <input value={publicKey} onChange={e=>setPublicKey(e.target.value)} placeholder="X-Tycoon-Public-Key" />
+                </div>
+              </div>
+              <label className="flex" style={{gap:8, marginTop:8}}>
+                <input type="checkbox" checked={respectLocks} onChange={e=>setRespectLocks(e.target.checked)} /> Respect API locks
+              </label>
+            </div>
+
+            <div className="card">
+              <h2>Player Discovery</h2>
+              <label>Servers JSON URL</label>
+              <input className="mono" value={serversJsonUrl} onChange={e=>setServersJsonUrl(e.target.value)} />
+              <label>(Optional) Extra widget URLs (one per line)</label>
+              <textarea className="mono" value={extraWidgets} onChange={e=>setExtraWidgets(e.target.value)} placeholder={`e.g.\nhttps://eu1.tycoon.community/widget/players.json\nhttps://ny1.tycoon.community/widget/players.json`} />
+
+              <div className="flex" style={{gap:12}}>
+                <div style={{flex:1}}>
+                  <label>Request limit</label>
+                  <input type="number" value={limitRequests} onChange={e=>setLimitRequests(parseInt(e.target.value||"0",10))} />
+                </div>
+                <div style={{flex:1}}>
+                  <label>Concurrency</label>
+                  <input type="number" value={concurrency} onChange={e=>setConcurrency(parseInt(e.target.value||"1",10))} />
+                </div>
+                <div style={{alignSelf:'end'}}>
+                  <button className="btn btn-primary" onClick={handleBuild}>Build Leaderboard</button>
+                </div>
+              </div>
+              <p className="muted" style={{marginTop:6}}>Tip: keep the limit modest to conserve API charges. Increase once verified.</p>
+            </div>
+          </div>
+
+          <div className="card" style={{marginTop:16}}>
+            <div className="flex between" style={{marginBottom:8}}>
+              <div className="flex" style={{gap:8}}>
+                <strong>Results</strong>
+                <span className="muted">{status}</span>
+              </div>
+              <input placeholder="Filter by name or vRP id…" value={filterText} onChange={e=>setFilterText(e.target.value)} />
+            </div>
+            <div style={{overflowX:'auto'}}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Rank</th>
+                    <th>vRP ID</th>
+                    <th>Name</th>
+                    <th>RTS Streak</th>
+                    <th>Locked/Err</th>
+                    <th>Server hint</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRows.map((r,i)=> (
+                    <tr key={`${r.id}-${i}`}> 
+                      <td>{i+1}</td>
+                      <td className="mono">{r.id}</td>
+                      <td>{r.name}</td>
+                      <td><strong>{r.streak ?? '—'}</strong></td>
+                      <td className="muted">{r.locked ? 'locked' : (r.error || '')}</td>
+                      <td className="muted">{r.serverHint}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <p className="muted" style={{marginTop:10}}><span className="pill">Privacy</span> If a player has enabled an API lock, the request will return a lock error unless you include their public key. Respect player privacy and community rules.</p>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
